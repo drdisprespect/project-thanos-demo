@@ -1,0 +1,175 @@
+import React, { useState } from 'react';
+import './App.css';
+import FileUploader from './components/FileUploader';
+import AnalysisTable from './components/AnalysisTable';
+import ResultsDashboard from './components/ResultsDashboard';
+import MetricsDashboard from './components/MetricsDashboard';
+import { ToastContainer, toast } from 'react-toastify';
+import 'react-toastify/dist/ReactToastify.css';
+
+function App() {
+  const [fileData, setFileData] = useState(null);
+  const [selectedRows, setSelectedRows] = useState([]);
+  const [results, setResults] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [activeTab, setActiveTab] = useState('upload'); // 'upload', 'results', 'metrics'
+
+  const handleFileUpload = (data) => {
+    setFileData(data);
+    setSelectedRows([]);
+    setResults([]);
+    toast.success('File uploaded successfully!');
+    setActiveTab('analysis');
+  };
+
+  const handleRowSelection = (rows) => {
+    setSelectedRows(rows);
+  };
+
+  const analyzeSelectedRows = async () => {
+    if (selectedRows.length === 0) {
+      toast.error('Please select at least one row for analysis');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const response = await fetch('http://localhost:8081/api/analyze', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ rows: selectedRows }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Error: ${response.status}`);
+      }
+
+      const data = await response.json();
+      setResults(data);
+      setActiveTab('results');
+      toast.success('Analysis completed successfully!');
+    } catch (error) {
+      toast.error(`Failed to analyze: ${error.message}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const analyzeAllRows = async () => {
+    if (!fileData || fileData.length === 0) {
+      toast.error('No data available for analysis');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const response = await fetch('http://localhost:8081/api/analyze', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ rows: fileData }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Error: ${response.status}`);
+      }
+
+      const data = await response.json();
+      setResults(data);
+      setActiveTab('results');
+      toast.success('Analysis of all rows completed successfully!');
+    } catch (error) {
+      toast.error(`Failed to analyze: ${error.message}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-gray-900 text-white">
+      <div className="bg-gradient-to-r from-purple-800 to-blue-900 p-4 shadow-lg">
+        <div className="container mx-auto flex justify-between items-center">
+          <h1 className="text-3xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-teal-400 to-cyan-300">
+            AML Analysis Dashboard
+          </h1>
+          <div className="flex space-x-4">
+            <button
+              onClick={() => setActiveTab('upload')}
+              className={`px-4 py-2 rounded-lg transition-all duration-300 ${activeTab === 'upload' ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'}`}
+            >
+              Upload
+            </button>
+            <button
+              onClick={() => setActiveTab('analysis')}
+              className={`px-4 py-2 rounded-lg transition-all duration-300 ${activeTab === 'analysis' ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'}`}
+              disabled={!fileData}
+            >
+              Analysis
+            </button>
+            <button
+              onClick={() => setActiveTab('results')}
+              className={`px-4 py-2 rounded-lg transition-all duration-300 ${activeTab === 'results' ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'}`}
+              disabled={results.length === 0}
+            >
+              Results
+            </button>
+            <button
+              onClick={() => setActiveTab('metrics')}
+              className={`px-4 py-2 rounded-lg transition-all duration-300 ${activeTab === 'metrics' ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'}`}
+              disabled={results.length === 0}
+            >
+              Metrics
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div className="container mx-auto p-6 max-w-7xl">
+        <div className="bg-gray-800 rounded-xl shadow-2xl p-6 mb-8 transition-all duration-500 transform hover:shadow-blue-900/20">
+          {activeTab === 'upload' && (
+            <FileUploader onFileUpload={handleFileUpload} />
+          )}
+
+          {activeTab === 'analysis' && fileData && (
+            <div className="space-y-6">
+              <div className="flex justify-between items-center">
+                <h2 className="text-2xl font-semibold text-cyan-300">Data Analysis</h2>
+                <div className="flex space-x-4">
+                  <button
+                    onClick={analyzeSelectedRows}
+                    disabled={loading}
+                    className="bg-indigo-600 hover:bg-indigo-700 px-4 py-2 rounded-lg transition-colors duration-300 disabled:bg-gray-600"
+                  >
+                    {loading ? 'Analyzing...' : 'Analyze Selected Rows'}
+                  </button>
+                  <button
+                    onClick={analyzeAllRows}
+                    disabled={loading}
+                    className="bg-purple-600 hover:bg-purple-700 px-4 py-2 rounded-lg transition-colors duration-300 disabled:bg-gray-600"
+                  >
+                    {loading ? 'Analyzing...' : 'Run All'}
+                  </button>
+                </div>
+              </div>
+              <AnalysisTable data={fileData} onRowSelection={handleRowSelection} />
+            </div>
+          )}
+
+          {activeTab === 'results' && results.length > 0 && (
+            <ResultsDashboard results={results} />
+          )}
+
+          {activeTab === 'metrics' && results.length > 0 && (
+            <MetricsDashboard results={results} />
+          )}
+        </div>
+      </div>
+      <ToastContainer position="bottom-right" theme="dark" />
+    </div>
+  );
+}
+
+export default App;
