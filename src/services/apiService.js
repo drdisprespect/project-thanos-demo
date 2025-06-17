@@ -1,10 +1,10 @@
 // Azure AI Configuration - using your provided credentials
 const AZURE_CONFIG = {
-  endpoint: process.env.REACT_APP_AZURE_AI_ENDPOINT || "https://aml-demo-final-resource.services.ai.azure.com/api/projects/aml-demo-final",
-  agentId: process.env.REACT_APP_AZURE_AI_AGENT_ID || "asst_mUm9Xg2K8omRackflVHu0Foy",
+  endpoint: process.env.REACT_APP_AZURE_AI_ENDPOINT || "https://project-aml-final.services.ai.azure.com/api/projects/project-aml-final",
+  agentId: process.env.REACT_APP_AZURE_AI_AGENT_ID || "asst_Lqv3j9peBP9VkIEAeCZL9Bpb",
   apiVersion: process.env.REACT_APP_AZURE_AI_API_VERSION || "2023-12-01-preview",
   apiKey: process.env.REACT_APP_AZURE_AI_API_KEY || "",
-  logicAppUrl: process.env.REACT_APP_LOGIC_APP_URL || "https://prod-35.eastus2.logic.azure.com:443/workflows/225dc0d0101648779132d323aa631f87/triggers/When_a_HTTP_request_is_received/paths/invoke?api-version=2016-10-01&sp=%2Ftriggers%2FWhen_a_HTTP_request_is_received%2Frun&sv=1.0&sig=HZmkzavSgK_r12pnH7xPBlvbm8GjptNoVdQNCoRruUk"
+  logicAppUrl: process.env.REACT_APP_LOGIC_APP_URL || "https://prod-72.westus.logic.azure.com:443/workflows/c1a88cfb82be4b13a87903021e57972d/triggers/When_a_HTTP_request_is_received/paths/invoke?api-version=2016-10-01&sp=%2Ftriggers%2FWhen_a_HTTP_request_is_received%2Frun&sv=1.0&sig=hIqAmWy311NV3KyIJK-UygnjyEyQCbqJSD7JdJa2CtU"
 };
 
 // Helper function to create error response
@@ -165,8 +165,13 @@ const processRow = async (row, onProgress) => {
       console.log(`📤 Row ${row.id}: Sending request (length: ${justificationText.length}) - Attempt ${attempt + 1}`);
       
       const requestBody = {
-        justification: justificationText
+        message: justificationText
       };
+      
+      console.log(`📋 Row ${row.id}: Request payload structure:`, {
+        type: "object", 
+        properties: { message: { type: "string", value: justificationText.substring(0, 100) + "..." } }
+      });
       
       // Create fetch request with same timeout as Go backend (600 seconds = 10 minutes)
       const controller = new AbortController();
