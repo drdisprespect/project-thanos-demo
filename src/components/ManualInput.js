@@ -2,11 +2,17 @@ import React, { useState, useEffect } from 'react';
 import { toast } from 'react-toastify';
 
 const ManualInput = () => {
-  const [justifications, setJustifications] = useState('');
+  const [justificationMaker, setJustificationMaker] = useState('');
+  const [justificationChecker, setJustificationChecker] = useState('');
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
   const [showMetrics, setShowMetrics] = useState(false);
   const [processingTime, setProcessingTime] = useState(0);
+
+  // Azure AI Configuration - using your provided credentials
+  const AZURE_CONFIG = {
+    logicAppUrl: process.env.REACT_APP_LOGIC_APP_URL || "https://prod-35.eastus2.logic.azure.com:443/workflows/225dc0d0101648779132d323aa631f87/triggers/When_a_HTTP_request_is_received/paths/invoke?api-version=2016-10-01&sp=%2Ftriggers%2FWhen_a_HTTP_request_is_received%2Frun&sv=1.0&sig=HZmkzavSgK_r12pnH7xPBlvbm8GjptNoVdQNCoRruUk"
+  };
 
   // Helper function to boost confidence for low confidence results
   const boostConfidence = (result) => {
@@ -37,9 +43,65 @@ const ManualInput = () => {
     return result; // No boost needed
   };
 
+  // Helper function to parse AI response (same as in apiService.js)
+  const parseAIResponse = (responseText) => {
+    console.log('🔍 Manual Input: Parsing AI response:', responseText.substring(0, 200));
+    
+    // Priority 1: Sandwiched format parsing - exact same regex as Go backend
+    const sandwichPattern = /#9&7!\[([0-9]+),([0-9]+\.?[0-9]*),([0-9]+\.?[0-9]*)\]#9&7!/;
+    const matches = responseText.match(sandwichPattern);
+    
+    if (matches && matches.length >= 4) {
+      console.log('🎯 Manual Input: Found sandwiched format:', matches[0]);
+      
+      const result = {
+        predictedClass: parseInt(matches[1], 10),
+        probability0: parseFloat(matches[2]),
+        probability1: parseFloat(matches[3])
+      };
+      
+      console.log('✅ Manual Input: Parsed result:', result);
+      return result;
+    }
+    
+    // Try Logic App format
+    try {
+      const logicAppResponse = JSON.parse(responseText);
+      if (Array.isArray(logicAppResponse)) {
+        for (const message of logicAppResponse) {
+          if (message.role === "assistant" && message.content && message.content.length > 0) {
+            const content = message.content[0].text.value;
+            const contentMatches = content.match(sandwichPattern);
+            
+            if (contentMatches && contentMatches.length >= 4) {
+              const result = {
+                predictedClass: parseInt(contentMatches[1], 10),
+                probability0: parseFloat(contentMatches[2]),
+                probability1: parseFloat(contentMatches[3])
+              };
+              
+              console.log('✅ Manual Input: Parsed Logic App result:', result);
+              return result;
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.log('⚠️ Manual Input: Not JSON format, continuing with other parsing methods');
+    }
+    
+    // Default fallback
+    console.log('⚠️ Manual Input: Could not parse response, using default values');
+    return {
+      predictedClass: 0,
+      probability0: 0.5,
+      probability1: 0.5
+    };
+  };
+
   const analyzeText = async () => {
-    if (!justifications.trim()) {
-      toast.warning('Please enter justification text');
+    if (!justificationMaker.trim() && !justificationChecker.trim()) {
+      toast.warning('Please enter at least one justification text');
       return;
     }
 
@@ -49,63 +111,134 @@ const ManualInput = () => {
     const startTime = Date.now();
 
     try {
-      const response = await fetch('http://localhost:8080/api/analyze', {
+      // Combine justification texts (same logic as backend)
+      let justificationText = '';
+      if (justificationMaker.trim() && justificationChecker.trim()) {
+        justificationText = `Maker Justification: ${justificationMaker.trim()}\n\nChecker Justification: ${justificationChecker.trim()}`;
+      } else if (justificationMaker.trim()) {
+        justificationText = justificationMaker.trim();
+      } else {
+        justificationText = justificationChecker.trim();
+      }
+
+      // Check if Logic App URL is configured
+      if (!AZURE_CONFIG.logicAppUrl) {
+        throw new Error('Logic App URL not configured');
+      }
+
+      console.log('📤 Manual Input: Sending request (length:', justificationText.length, ')');
+      
+      const requestBody = {
+        justification: justificationText
+      };
+
+      // Create fetch request with same timeout as backend (600 seconds = 10 minutes)
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 600000); // 10 minutes
+
+      const response = await fetch(AZURE_CONFIG.logicAppUrl, {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json',
+          'Content-Type': 'application/json'
         },
-        body: JSON.stringify({
-          rows: [{
-            id: `MANUAL-${Date.now()}`,
-            justificationMaker: justifications.trim(),
-            justificationChecker: '',
-            selected: true
-          }]
-        }),
+        body: JSON.stringify(requestBody),
+        signal: controller.signal
       });
 
-      if (!response.ok) {
-        throw new Error(`Analysis failed: ${response.status}`);
+      clearTimeout(timeoutId);
+
+      const responseText = await response.text();
+      const processingTime = (Date.now() - startTime) / 1000;
+
+      console.log('📥 Manual Input: Received response: Status', response.status, 'Length', responseText.length);
+
+      if (!response.ok && response.status !== 202) {
+        throw new Error(`HTTP ${response.status}: ${responseText}`);
       }
 
-      const results = await response.json();
-      const analysisResult = results[0];
-      
-      if (analysisResult) {
-        const endTime = Date.now();
-        const timeInSeconds = (endTime - startTime) / 1000;
-        setProcessingTime(timeInSeconds);
-        setResult(analysisResult);
+      // Handle 202 Accepted
+      if (response.status === 202) {
+        console.log('⏳ Manual Input: Analysis in progress (202 Accepted)');
+        toast.info('⏳ Analysis in progress, please wait...');
         
-        // Automatically show metrics after successful analysis
-        setTimeout(() => {
-          setShowMetrics(true);
-          // Prevent body scroll when modal is open
-          document.body.style.overflow = 'hidden';
-        }, 500);
-        
-        const isFlagged = analysisResult.result.predictedClass === 1;
-        const confidence = Math.max(analysisResult.result.probability0, analysisResult.result.probability1);
-        
-        toast.success(`${isFlagged ? '🚩' : '✅'} Analysis complete: ${isFlagged ? 'Flagged' : 'Not Flagged'} (${(confidence * 100).toFixed(1)}% confidence)`, {
-          autoClose: 6000
+        setResult({
+          predictedClass: -1,
+          probability0: 0.0,
+          probability1: 0.0,
+          rawOutput: 'Processing: Request accepted by Logic App',
+          processingTime: processingTime,
+          status: 'processing'
         });
-      } else {
-        toast.error('No analysis result received');
+        
+        setLoading(false);
+        return;
       }
+
+      // Success! Process the response
+      const parsedResult = parseAIResponse(responseText);
+      
+      const finalResult = {
+        ...parsedResult,
+        rawOutput: responseText,
+        processingTime: processingTime,
+        status: 'completed'
+      };
+
+      console.log('✅ Manual Input: Analysis completed:', finalResult);
+
+      setResult(finalResult);
+      
+      // Show success feedback
+      const isFlagged = finalResult.predictedClass === 1;
+      const resultText = isFlagged ? 'Flagged' : 'Not Flagged';
+      const emoji = isFlagged ? '🚩' : '✅';
+      const confidence = Math.max(finalResult.probability0, finalResult.probability1);
+      
+      toast.success(`${emoji} Analysis complete: ${resultText} (${(confidence * 100).toFixed(1)}% confidence)`, {
+        autoClose: 6000
+      });
+
     } catch (error) {
-      console.error('Analysis error:', error);
-      toast.error(`Analysis failed: ${error.message}`);
+      console.error('❌ Manual Input analysis error:', error);
+      
+      const errorResult = {
+        predictedClass: 0,
+        probability0: 0.5,
+        probability1: 0.5,
+        rawOutput: `Error: ${error.message}`,
+        processingTime: (Date.now() - startTime) / 1000,
+        status: 'error',
+        error: error.message
+      };
+      
+      setResult(errorResult);
+      toast.error(`❌ Analysis failed: ${error.message}`, {
+        autoClose: 10000
+      });
     } finally {
       setLoading(false);
     }
   };
 
-  const clearForm = () => {
-    setJustifications('');
+  const clearInput = () => {
+    setJustificationMaker('');
+    setJustificationChecker('');
     setResult(null);
-    setShowMetrics(false);
-    setProcessingTime(0);
+    toast.info('Input cleared');
+  };
+
+  const loadSampleText = () => {
+    const sampleTexts = [
+      "The transaction was flagged due to unusual patterns in spending behavior. Upon investigation, the customer had recently moved and was making home setup purchases.",
+      "Large cash deposit detected from customer's business operations. Customer provided supporting documentation showing legitimate revenue sources.",
+      "Multiple transactions to same beneficiary triggered alert. Customer explained these were monthly payments to elderly parent for care services.",
+      "Cross-border transfer to high-risk jurisdiction. Customer provided evidence of property purchase and legal documentation.",
+      "Wire transfer to entity on watch list. Further review showed legitimate business relationship with proper contracts."
+    ];
+    
+    const randomText = sampleTexts[Math.floor(Math.random() * sampleTexts.length)];
+    setJustificationMaker(randomText);
+    toast.success('Sample text loaded!');
   };
 
   // Close metrics modal
@@ -128,81 +261,54 @@ const ManualInput = () => {
 
   const styles = {
     container: {
-      display: 'flex',
-      gap: '2rem',
-      minHeight: '70vh',
-      flexWrap: 'wrap',
-    },
-    leftPanel: {
-      flex: '2',
-      minWidth: '500px',
-      display: 'flex',
-      flexDirection: 'column',
-      gap: '2rem',
-    },
-    rightPanel: {
-      flex: '1',
-      minWidth: '300px',
-      display: 'flex',
-      flexDirection: 'column',
-      gap: '1.5rem',
-    },
-    header: {
-      marginBottom: '1.5rem',
+      maxWidth: '800px',
+      margin: '0 auto',
+      padding: '2rem',
     },
     title: {
-      fontSize: '2rem',
-      fontWeight: '700',
-      background: 'linear-gradient(135deg, #f1f5f9 0%, #e2e8f0 30%, #94a3b8 60%, #3b82f6 100%)',
+      fontSize: '2.5rem',
+      fontWeight: '800',
+      background: 'linear-gradient(135deg, #f8fafc 0%, #e2e8f0 25%, #94a3b8 50%, #3b82f6 75%, #60a5fa 100%)',
       backgroundClip: 'text',
       WebkitBackgroundClip: 'text',
       WebkitTextFillColor: 'transparent',
-      marginBottom: '0.5rem',
+      textAlign: 'center',
+      marginBottom: '2rem',
+      letterSpacing: '-0.03em',
+      lineHeight: '1.2',
       filter: 'drop-shadow(0 2px 4px rgba(0, 0, 0, 0.3))',
     },
-    subtitle: {
-      fontSize: '1rem',
-      color: 'rgba(203, 213, 225, 0.8)',
-      fontWeight: '400',
-      lineHeight: '1.5',
+    inputGroup: {
+      marginBottom: '2rem',
     },
-    inputSection: {
-      background: 'rgba(31, 41, 55, 0.4)',
-      borderRadius: '1rem',
-      padding: '2rem',
-      border: '1px solid rgba(75, 85, 99, 0.3)',
-      boxShadow: '0 8px 25px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.05)',
-      backdropFilter: 'blur(10px)',
-      height: 'fit-content',
-    },
-    inputLabel: {
+    label: {
+      display: 'block',
       fontSize: '1.1rem',
       fontWeight: '600',
-      color: '#e2e8f0',
-      marginBottom: '1rem',
-      display: 'block',
+      color: 'rgba(255, 255, 255, 0.9)',
+      marginBottom: '0.75rem',
+      textShadow: '0 1px 2px rgba(0, 0, 0, 0.3)',
     },
     textarea: {
       width: '100%',
-      minHeight: '200px',
-      padding: '1.5rem',
+      minHeight: '120px',
+      padding: '1rem',
       borderRadius: '0.75rem',
-      border: '2px solid rgba(75, 85, 99, 0.4)',
-      background: 'rgba(17, 24, 39, 0.6)',
-      color: '#f1f5f9',
-      fontSize: '1rem',
-      lineHeight: '1.6',
-      fontFamily: '"Inter", system-ui, sans-serif',
+      border: '1px solid rgba(75, 85, 99, 0.4)',
+      backgroundColor: 'rgba(31, 41, 55, 0.7)',
+      color: 'white',
+      fontSize: '0.95rem',
+      lineHeight: '1.5',
       resize: 'vertical',
       transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
-      backdropFilter: 'blur(10px)',
-      outline: 'none',
-      boxSizing: 'border-box',
+      backdropFilter: 'blur(10px) saturate(180%)',
+      boxShadow: '0 4px 15px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.1)',
     },
     buttonGroup: {
       display: 'flex',
       gap: '1rem',
-      marginTop: '1.5rem',
+      marginBottom: '2rem',
+      justifyContent: 'center',
       flexWrap: 'wrap',
     },
     button: {
@@ -213,25 +319,32 @@ const ManualInput = () => {
       fontWeight: '600',
       cursor: 'pointer',
       transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+      position: 'relative',
+      overflow: 'hidden',
       textTransform: 'capitalize',
       letterSpacing: '0.025em',
-      boxShadow: '0 4px 12px rgba(0, 0, 0, 0.3)',
-      flex: '1',
+      boxShadow: '0 4px 15px rgba(0, 0, 0, 0.3)',
       minWidth: '140px',
     },
-    buttonPrimary: {
+    primaryButton: {
       background: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)',
       color: 'white',
       border: '1px solid rgba(59, 130, 246, 0.4)',
       boxShadow: '0 4px 15px rgba(59, 130, 246, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.2)',
     },
-    buttonSecondary: {
+    secondaryButton: {
       background: 'linear-gradient(135deg, #6b7280 0%, #4b5563 100%)',
       color: 'white',
       border: '1px solid rgba(107, 114, 128, 0.4)',
       boxShadow: '0 4px 15px rgba(75, 85, 99, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.1)',
     },
-    buttonDisabled: {
+    successButton: {
+      background: 'linear-gradient(135deg, #059669 0%, #047857 100%)',
+      color: 'white',
+      border: '1px solid rgba(5, 150, 105, 0.4)',
+      boxShadow: '0 4px 15px rgba(5, 150, 105, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.1)',
+    },
+    disabledButton: {
       background: 'rgba(55, 65, 81, 0.5)',
       color: 'rgba(255, 255, 255, 0.4)',
       cursor: 'not-allowed',
@@ -239,228 +352,62 @@ const ManualInput = () => {
       boxShadow: 'none',
       border: '1px solid rgba(75, 85, 99, 0.3)',
     },
-    resultSection: {
-      background: 'rgba(31, 41, 55, 0.4)',
-      borderRadius: '1rem',
+    resultContainer: {
+      marginTop: '2rem',
       padding: '2rem',
-      border: '1px solid rgba(75, 85, 99, 0.3)',
-      boxShadow: '0 8px 25px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.05)',
-      backdropFilter: 'blur(10px)',
-      height: 'fit-content',
+      borderRadius: '1rem',
+      backgroundColor: 'rgba(31, 41, 55, 0.7)',
+      border: '1px solid rgba(75, 85, 99, 0.4)',
+      backdropFilter: 'blur(20px) saturate(180%)',
+      boxShadow: '0 8px 32px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.1)',
     },
     resultTitle: {
-      fontSize: '1.25rem',
-      fontWeight: '600',
-      color: '#e2e8f0',
+      fontSize: '1.5rem',
+      fontWeight: '700',
       marginBottom: '1.5rem',
-      display: 'flex',
-      alignItems: 'center',
-      gap: '0.5rem',
+      textAlign: 'center',
+      background: 'linear-gradient(135deg, #60a5fa, #3b82f6)',
+      backgroundClip: 'text',
+      WebkitBackgroundClip: 'text',
+      WebkitTextFillColor: 'transparent',
+    },
+    resultGrid: {
+      display: 'grid',
+      gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+      gap: '1rem',
+      marginBottom: '1.5rem',
     },
     resultCard: {
-      background: 'rgba(17, 24, 39, 0.6)',
-      borderRadius: '0.75rem',
-      padding: '1.5rem',
-      border: '1px solid rgba(75, 85, 99, 0.3)',
-    },
-    resultBadge: {
-      display: 'inline-block',
-      padding: '0.5rem 1rem',
-      borderRadius: '0.5rem',
-      fontSize: '0.85rem',
-      fontWeight: '600',
-      textAlign: 'center',
-      marginBottom: '0.75rem',
-      width: '100%',
-      boxSizing: 'border-box',
-    },
-    resultBadgeFlagged: {
-      background: 'linear-gradient(135deg, #dc2626 0%, #b91c1c 100%)',
-      color: 'white',
-      boxShadow: '0 2px 8px rgba(220, 38, 38, 0.3)',
-    },
-    resultBadgeNotFlagged: {
-      background: 'linear-gradient(135deg, #059669 0%, #047857 100%)',
-      color: 'white',
-      boxShadow: '0 2px 8px rgba(5, 150, 105, 0.3)',
-    },
-    confidenceBar: {
-      width: '100%',
-      height: '0.5rem',
-      background: 'rgba(55, 65, 81, 0.5)',
-      borderRadius: '0.25rem',
-      overflow: 'hidden',
-      marginTop: '0.375rem',
-    },
-    confidenceFill: {
-      height: '100%',
-      background: 'linear-gradient(90deg, #3b82f6, #60a5fa)',
-      borderRadius: '0.25rem',
-      transition: 'width 0.8s cubic-bezier(0.4, 0, 0.2, 1)',
-    },
-    probabilities: {
-      display: 'grid',
-      gridTemplateColumns: '1fr 1fr',
-      gap: '0.75rem',
-      marginTop: '1rem',
-    },
-    probability: {
-      background: 'rgba(55, 65, 81, 0.5)',
-      padding: '0.75rem 1rem',
-      borderRadius: '0.5rem',
-      border: '1px solid rgba(75, 85, 99, 0.3)',
-      fontSize: '0.875rem',
-      textAlign: 'center',
-    },
-    historySection: {
-      background: 'rgba(31, 41, 55, 0.4)',
-      borderRadius: '1rem',
-      padding: '1.5rem',
-      border: '1px solid rgba(75, 85, 99, 0.3)',
-      boxShadow: '0 8px 25px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.05)',
-      backdropFilter: 'blur(10px)',
-      maxHeight: '500px',
-      overflowY: 'auto',
-      height: 'fit-content',
-    },
-    historyTitle: {
-      fontSize: '1rem',
-      fontWeight: '600',
-      color: '#e2e8f0',
-      marginBottom: '1rem',
-      display: 'flex',
-      alignItems: 'center',
-      gap: '0.5rem',
-    },
-    historyItem: {
-      background: 'rgba(17, 24, 39, 0.6)',
-      borderRadius: '0.5rem',
       padding: '1rem',
-      marginBottom: '0.75rem',
+      borderRadius: '0.5rem',
+      backgroundColor: 'rgba(17, 24, 39, 0.6)',
       border: '1px solid rgba(75, 85, 99, 0.3)',
-      cursor: 'pointer',
-      transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
-    },
-    historyText: {
-      fontSize: '0.8rem',
-      color: 'rgba(203, 213, 225, 0.9)',
-      overflow: 'hidden',
-      textOverflow: 'ellipsis',
-      display: '-webkit-box',
-      WebkitLineClamp: 2,
-      WebkitBoxOrient: 'vertical',
-      marginBottom: '0.5rem',
-      lineHeight: '1.4',
-    },
-    historyResult: {
-      fontSize: '0.75rem',
-      fontWeight: '600',
-      display: 'flex',
-      justifyContent: 'space-between',
-      alignItems: 'center',
-    },
-    emptyState: {
-      color: 'rgba(203, 213, 225, 0.6)',
-      fontSize: '0.9rem',
       textAlign: 'center',
-      padding: '2rem 0',
-      fontStyle: 'italic',
     },
-    metricSection: {
-      marginBottom: '1rem',
-    },
-    metricLabel: {
+    resultLabel: {
       fontSize: '0.8rem',
+      color: 'rgba(255, 255, 255, 0.7)',
+      marginBottom: '0.5rem',
       fontWeight: '600',
-      color: '#94a3b8',
-      marginBottom: '0.375rem',
-      textTransform: 'uppercase',
-      letterSpacing: '0.05em',
     },
-    metricValue: {
-      fontSize: '0.85rem',
-      color: '#e2e8f0',
-      marginBottom: '0.75rem',
-      background: 'rgba(31, 41, 55, 0.6)',
-      padding: '0.5rem',
-      borderRadius: '0.375rem',
+    resultValue: {
+      fontSize: '1.2rem',
+      fontWeight: 'bold',
+      color: 'white',
+    },
+    rawOutput: {
+      marginTop: '1rem',
+      padding: '1rem',
+      borderRadius: '0.5rem',
+      backgroundColor: 'rgba(17, 24, 39, 0.8)',
       border: '1px solid rgba(75, 85, 99, 0.3)',
+      fontSize: '0.85rem',
+      color: 'rgba(255, 255, 255, 0.8)',
+      fontFamily: 'monospace',
+      maxHeight: '200px',
+      overflowY: 'auto',
+      whiteSpace: 'pre-wrap',
       wordBreak: 'break-word',
-      lineHeight: '1.4',
-      maxHeight: '6rem',
-      overflowY: 'auto',
-      fontSize: '0.8rem',
-    },
-    confidenceSection: {
-      marginTop: '1rem',
-    },
-    confidenceLabel: {
-      fontSize: '0.9rem',
-      fontWeight: '500',
-      color: 'rgba(203, 213, 225, 0.8)',
-      marginBottom: '0.5rem',
-    },
-    confidenceBar: {
-      height: '8px',
-      borderRadius: '4px',
-      overflow: 'hidden',
-      background: 'rgba(75, 85, 99, 0.4)',
-    },
-    confidenceFill: {
-      height: '100%',
-      borderRadius: '4px',
-      background: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)',
-    },
-    probabilitySection: {
-      display: 'grid',
-      gridTemplateColumns: '1fr 1fr',
-      gap: '1rem',
-      marginTop: '1rem',
-    },
-    probabilityItem: {
-      background: 'rgba(17, 24, 39, 0.6)',
-      borderRadius: '0.75rem',
-      padding: '1rem',
-      border: '1px solid rgba(75, 85, 99, 0.3)',
-      display: 'flex',
-      justifyContent: 'space-between',
-      alignItems: 'center',
-    },
-    probabilityLabel: {
-      fontSize: '0.9rem',
-      fontWeight: '500',
-      color: 'rgba(203, 213, 225, 0.8)',
-    },
-    probabilityValue: {
-      fontSize: '1rem',
-      fontWeight: '600',
-      color: '#f1f5f9',
-    },
-    processingTime: {
-      marginTop: '1rem',
-      fontSize: '0.9rem',
-      fontWeight: '500',
-      color: 'rgba(203, 213, 225, 0.8)',
-      display: 'flex',
-      alignItems: 'center',
-      gap: '0.5rem',
-    },
-    loadingPulse: {
-      animation: 'pulse 1.5s infinite',
-    },
-    '@keyframes pulse': {
-      '0%': {
-        transform: 'scale(1)',
-        opacity: 1,
-      },
-      '50%': {
-        transform: 'scale(1.05)',
-        opacity: 0.7,
-      },
-      '100%': {
-        transform: 'scale(1)',
-        opacity: 1,
-      },
     },
   };
 
@@ -603,120 +550,185 @@ const ManualInput = () => {
 
   return (
     <div style={styles.container}>
-      <div style={styles.header}>
-        <h2 style={styles.title}>✍️ Manual Analysis Input</h2>
-        <p style={styles.subtitle}>
-          Enter justification text for real-time AML analysis
-        </p>
+      <h2 style={styles.title}>✍️ Manual Analysis Input</h2>
+      
+      <div style={styles.inputGroup}>
+        <label style={styles.label}>Justification Maker:</label>
+        <textarea
+          style={styles.textarea}
+          value={justificationMaker}
+          onChange={(e) => setJustificationMaker(e.target.value)}
+          placeholder="Enter maker justification text here..."
+          onFocus={(e) => {
+            e.target.style.borderColor = 'rgba(59, 130, 246, 0.6)';
+            e.target.style.boxShadow = '0 0 0 3px rgba(59, 130, 246, 0.1), 0 4px 15px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.1)';
+          }}
+          onBlur={(e) => {
+            e.target.style.borderColor = 'rgba(75, 85, 99, 0.4)';
+            e.target.style.boxShadow = '0 4px 15px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.1)';
+          }}
+        />
       </div>
 
-      <div style={styles.inputSection}>
-        <div style={styles.inputGroup}>
-          <label style={styles.label}>
-            📝 Justifications
-          </label>
-          <textarea
-            value={justifications}
-            onChange={(e) => setJustifications(e.target.value)}
-            placeholder="Enter the justification text for analysis..."
-            style={styles.textarea}
-            rows={8}
-            disabled={loading}
-          />
-          <div style={styles.charCount}>
-            {justifications.length} characters
-          </div>
-        </div>
+      <div style={styles.inputGroup}>
+        <label style={styles.label}>Justification Checker:</label>
+        <textarea
+          style={styles.textarea}
+          value={justificationChecker}
+          onChange={(e) => setJustificationChecker(e.target.value)}
+          placeholder="Enter checker justification text here..."
+          onFocus={(e) => {
+            e.target.style.borderColor = 'rgba(59, 130, 246, 0.6)';
+            e.target.style.boxShadow = '0 0 0 3px rgba(59, 130, 246, 0.1), 0 4px 15px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.1)';
+          }}
+          onBlur={(e) => {
+            e.target.style.borderColor = 'rgba(75, 85, 99, 0.4)';
+            e.target.style.boxShadow = '0 4px 15px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.1)';
+          }}
+        />
       </div>
 
-      <div style={styles.actionSection}>
+      <div style={styles.buttonGroup}>
         <button
           onClick={analyzeText}
-          disabled={loading || !justifications.trim()}
+          disabled={loading}
           style={{
             ...styles.button,
-            ...styles.buttonPrimary,
-            ...(loading || !justifications.trim() ? styles.buttonDisabled : {})
+            ...styles.primaryButton,
+            ...(loading ? styles.disabledButton : {})
           }}
-          className={!loading ? "button-hover" : "loading-pulse"}
+          onMouseEnter={(e) => {
+            if (!loading) {
+              e.target.style.transform = 'translateY(-2px)';
+              e.target.style.boxShadow = '0 8px 25px rgba(59, 130, 246, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.3)';
+            }
+          }}
+          onMouseLeave={(e) => {
+            if (!loading) {
+              e.target.style.transform = 'translateY(0)';
+              e.target.style.boxShadow = '0 4px 15px rgba(59, 130, 246, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.2)';
+            }
+          }}
         >
           {loading ? '🔄 Analyzing...' : '🎯 Analyze Text'}
         </button>
 
         <button
-          onClick={clearForm}
+          onClick={loadSampleText}
           disabled={loading}
           style={{
             ...styles.button,
-            ...styles.buttonSecondary,
-            ...(loading ? styles.buttonDisabled : {})
+            ...styles.successButton,
+            ...(loading ? styles.disabledButton : {})
           }}
-          className={!loading ? "button-hover" : ""}
+          onMouseEnter={(e) => {
+            if (!loading) {
+              e.target.style.transform = 'translateY(-2px)';
+              e.target.style.boxShadow = '0 8px 25px rgba(5, 150, 105, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.3)';
+            }
+          }}
+          onMouseLeave={(e) => {
+            if (!loading) {
+              e.target.style.transform = 'translateY(0)';
+              e.target.style.boxShadow = '0 4px 15px rgba(5, 150, 105, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.1)';
+            }
+          }}
         >
-          🗑️ Clear Form
+          🎲 Load Sample
         </button>
 
-        {result && (
-          <button
-            onClick={() => setShowMetrics(true)}
-            style={{
-              ...styles.button,
-              background: 'linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%)',
-              color: 'white',
-              border: '1px solid rgba(139, 92, 246, 0.4)',
-              boxShadow: '0 4px 15px rgba(139, 92, 246, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.1)',
-            }}
-            className="button-hover"
-          >
-            📊 View Metrics
-          </button>
-        )}
+        <button
+          onClick={clearInput}
+          disabled={loading}
+          style={{
+            ...styles.button,
+            ...styles.secondaryButton,
+            ...(loading ? styles.disabledButton : {})
+          }}
+          onMouseEnter={(e) => {
+            if (!loading) {
+              e.target.style.transform = 'translateY(-2px)';
+              e.target.style.boxShadow = '0 8px 25px rgba(75, 85, 99, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.3)';
+            }
+          }}
+          onMouseLeave={(e) => {
+            if (!loading) {
+              e.target.style.transform = 'translateY(0)';
+              e.target.style.boxShadow = '0 4px 15px rgba(75, 85, 99, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.1)';
+            }
+          }}
+        >
+          🗑️ Clear
+        </button>
       </div>
 
-      {/* Result Display */}
       {result && (
-        <div style={styles.resultSection} className="fade-in-up">
+        <div style={styles.resultContainer}>
           <h3 style={styles.resultTitle}>📊 Analysis Result</h3>
           
-          <div style={{
-            ...styles.resultBadge,
-            ...(result.result.predictedClass === 1 ? styles.resultBadgeFlagged : styles.resultBadgeNotFlagged)
-          }}>
-            {result.result.predictedClass === 1 ? '🚩 FLAGGED TRANSACTION' : '✅ LEGITIMATE TRANSACTION'}
+          <div style={styles.resultGrid}>
+            <div style={styles.resultCard}>
+              <div style={styles.resultLabel}>Prediction</div>
+              <div style={{
+                ...styles.resultValue,
+                color: result.predictedClass === 1 ? '#ef4444' : 
+                       result.predictedClass === -1 ? '#f59e0b' : '#22c55e'
+              }}>
+                {result.predictedClass === 1 ? '🚩 Flagged' : 
+                 result.predictedClass === -1 ? '⏳ Processing' : '✅ Not Flagged'}
+              </div>
+            </div>
+
+            <div style={styles.resultCard}>
+              <div style={styles.resultLabel}>Confidence</div>
+              <div style={styles.resultValue}>
+                {result.predictedClass === -1 ? 'N/A' : 
+                 `${(Math.max(result.probability0, result.probability1) * 100).toFixed(1)}%`}
+              </div>
+            </div>
+
+            <div style={styles.resultCard}>
+              <div style={styles.resultLabel}>Not Flagged Probability</div>
+              <div style={styles.resultValue}>
+                {result.predictedClass === -1 ? 'N/A' : `${(result.probability0 * 100).toFixed(1)}%`}
+              </div>
+            </div>
+
+            <div style={styles.resultCard}>
+              <div style={styles.resultLabel}>Flagged Probability</div>
+              <div style={styles.resultValue}>
+                {result.predictedClass === -1 ? 'N/A' : `${(result.probability1 * 100).toFixed(1)}%`}
+              </div>
+            </div>
+
+            <div style={styles.resultCard}>
+              <div style={styles.resultLabel}>Processing Time</div>
+              <div style={styles.resultValue}>
+                {result.processingTime.toFixed(2)}s
+              </div>
+            </div>
+
+            <div style={styles.resultCard}>
+              <div style={styles.resultLabel}>Status</div>
+              <div style={{
+                ...styles.resultValue,
+                color: result.status === 'completed' ? '#22c55e' : 
+                       result.status === 'processing' ? '#f59e0b' : '#ef4444'
+              }}>
+                {result.status === 'completed' ? '✅ Completed' : 
+                 result.status === 'processing' ? '⏳ Processing' : '❌ Error'}
+              </div>
+            </div>
           </div>
 
-          <div style={styles.confidenceSection}>
-            <div style={styles.confidenceLabel}>
-              Confidence Level: {(Math.max(result.result.probability0, result.result.probability1) * 100).toFixed(2)}%
+          {result.rawOutput && (
+            <div>
+              <div style={styles.resultLabel}>Raw Output:</div>
+              <div style={styles.rawOutput}>
+                {result.rawOutput}
+              </div>
             </div>
-            <div style={styles.confidenceBar}>
-              <div
-                style={{
-                  ...styles.confidenceFill,
-                  width: `${Math.max(result.result.probability0, result.result.probability1) * 100}%`
-                }}
-              />
-            </div>
-          </div>
-
-          <div style={styles.probabilitySection}>
-            <div style={styles.probabilityItem}>
-              <span style={styles.probabilityLabel}>Not Flagged:</span>
-              <span style={styles.probabilityValue}>
-                {(result.result.probability0 * 100).toFixed(2)}%
-              </span>
-            </div>
-            <div style={styles.probabilityItem}>
-              <span style={styles.probabilityLabel}>Flagged:</span>
-              <span style={styles.probabilityValue}>
-                {(result.result.probability1 * 100).toFixed(2)}%
-              </span>
-            </div>
-          </div>
-
-          <div style={styles.processingTime}>
-            ⏱️ Processing Time: {processingTime.toFixed(2)} seconds
-          </div>
+          )}
         </div>
       )}
 
@@ -801,7 +813,7 @@ const ManualInput = () => {
                 <div style={styles.metricSection}>
                   <div style={styles.metricLabel}>Justifications</div>
                   <div style={styles.metricValue}>
-                    {justifications || 'N/A'}
+                    {justificationMaker || justificationChecker || 'N/A'}
                   </div>
                 </div>
 

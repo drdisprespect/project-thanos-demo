@@ -2,5 +2,7 @@
     "appService.zipIgnorePattern": [
         "node_modules{,/**}",
         ".vscode{,/**}"
-    ]
+    ],
+    "appService.defaultWebAppToDeploy": "/subscriptions/699cb374-9c7d-478c-9747-9e778ee3d252/resourceGroups/as-project-thanos-endgame_group/providers/Microsoft.Web/sites/as-project-thanos-endgame",
+    "appService.deploySubpath": "."
 }

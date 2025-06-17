@@ -7,6 +7,7 @@ import ManualInput from './components/ManualInput';
 import { ToastContainer, toast } from 'react-toastify';
 // Temporarily commenting out ReactToastify CSS import to avoid build errors
 // import 'react-toastify/dist/ReactToastify.css';
+import { analyzeRowsStream } from './services/apiService';
 
 function App() {
   const [fileData, setFileData] = useState(null);
@@ -17,9 +18,6 @@ function App() {
   
   // Track loading state for individual rows
   const [rowLoadingStates, setRowLoadingStates] = useState({});
-
-  // Use the correct public folder path for your profile image
-  const [profileImage, setProfileImage] = useState('/assets/profile.jpg');
 
   // Generate sample data for testing
   const generateSampleData = () => {
@@ -230,102 +228,53 @@ function App() {
   // New streaming analysis function
   const startStreamingAnalysis = (rowsToAnalyze, trackingRowIds) => {
     return new Promise((resolve, reject) => {
-      console.log('🔄 Starting streaming analysis...');
+      console.log('🔄 Starting integrated streaming analysis...');
       
-      // Send POST request to start streaming
-      fetch('http://localhost:8080/api/analyze-stream', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ rows: rowsToAnalyze }),
-      }).then(response => {
-        if (!response.ok) {
-          throw new Error(`HTTP error! Status: ${response.status}`);
-        }
-
-        console.log('📡 Streaming connection established');
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let completedRows = 0;
-        let totalRows = trackingRowIds.length;
-        let buffer = ''; // Buffer for incomplete lines
+      let completedRows = 0;
+      const totalRows = trackingRowIds.length;
+      
+      // Use the integrated API service
+      analyzeRowsStream(rowsToAnalyze, (event) => {
+        handleStreamEvent(event, trackingRowIds);
         
-        function readStream() {
-          return reader.read().then(({ done, value }) => {
-            if (done) {
-              console.log('🏁 Stream complete');
-              setLoading(false);
-              
-              // Final check - if we didn't get all rows, show completion message
-              if (completedRows > 0) {
-                toast.success(`🎉 Analysis complete! Processed ${completedRows}/${totalRows} rows`);
-              }
-              resolve();
-              return;
-            }
-
-            // Decode the chunk and add to buffer
-            const chunk = decoder.decode(value, { stream: true });
-            buffer += chunk;
-            
-            // Split by lines and process complete lines
-            const lines = buffer.split('\n');
-            buffer = lines.pop() || ''; // Keep the last incomplete line in buffer
-            
-            for (const line of lines) {
-              if (line.trim() === '') continue; // Skip empty lines
-              
-              if (line.startsWith('data: ')) {
-                try {
-                  const jsonStr = line.slice(6).trim(); // Remove 'data: ' prefix
-                  if (jsonStr === '') continue; // Skip empty data lines
-                  
-                  console.log('📥 Received stream data:', jsonStr);
-                  const data = JSON.parse(jsonStr);
-                  
-                  handleStreamEvent(data, trackingRowIds);
-                  
-                  // Track completion
-                  if (data.type === 'row_complete' || data.type === 'row_error') {
-                    completedRows++;
-                    console.log(`✅ Progress: ${completedRows}/${totalRows} rows completed`);
-                    
-                    // Check if all rows are done
-                    if (completedRows >= totalRows) {
-                      console.log('🎯 All rows completed!');
-                      setLoading(false);
-                      toast.success(`🎉 Analysis complete! Processed ${completedRows} rows`);
-                      // Don't resolve immediately, let the stream finish naturally
-                    }
-                  }
-                } catch (error) {
-                  console.error('❌ Error parsing stream data:', error, 'Raw line:', line);
-                  // Don't fail the whole stream for one parsing error
-                }
-              }
-            }
-
-            return readStream();
-          });
+        // Track completion
+        if (event.type === 'row_complete' || event.type === 'row_error') {
+          completedRows++;
+          console.log(`✅ Progress: ${completedRows}/${totalRows} rows completed`);
+          
+          // Check if all rows are done
+          if (completedRows >= totalRows) {
+            console.log('🎯 All rows completed!');
+            setLoading(false);
+            toast.success(`🎉 Analysis complete! Processed ${completedRows} rows`);
+          }
         }
-
-        readStream().catch(error => {
-          console.error('💥 Stream reading error:', error);
+        
+        if (event.type === 'complete') {
+          console.log('🏁 Stream complete');
           setLoading(false);
           
-          // If we got some results, don't treat as complete failure
           if (completedRows > 0) {
-            toast.warning(`⚠️ Stream ended early. Completed ${completedRows}/${totalRows} rows`);
-            resolve(); // Partial success
-          } else {
-            reject(error);
+            toast.success(`🎉 Analysis complete! Processed ${completedRows} rows`);
           }
-        });
-
-      }).catch(error => {
-        console.error('🚨 Fetch error:', error);
-        reject(error);
+          resolve();
+        }
+      })
+      .then(() => {
+        console.log('🎉 Integrated analysis completed successfully');
+        resolve();
+      })
+      .catch((error) => {
+        console.error('💥 Integrated analysis error:', error);
+        setLoading(false);
+        
+        // If we got some results, don't treat as complete failure
+        if (completedRows > 0) {
+          toast.warning(`⚠️ Analysis ended early. Completed ${completedRows}/${totalRows} rows`);
+          resolve(); // Partial success
+        } else {
+          reject(error);
+        }
       });
     });
   };
@@ -585,51 +534,6 @@ function App() {
       alignItems: 'center',
       gap: '2rem',
     },
-    logoSection: {
-      display: 'flex',
-      alignItems: 'center',
-      gap: '1rem',
-    },
-    logoContainer: {
-      width: '100px',
-      height: '60px',
-      borderRadius: '0.75rem',
-      background: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      boxShadow: '0 4px 12px rgba(59, 130, 246, 0.2)', // Reduced shadow intensity
-      border: 'none', // Removed thick border
-      cursor: 'pointer',
-      transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
-      position: 'relative',
-      overflow: 'hidden',
-      padding: '4px',
-    },
-    logoText: {
-      fontSize: '1.5rem',
-      fontWeight: '900',
-      color: 'white',
-      textShadow: '0 2px 4px rgba(0, 0, 0, 0.3)',
-    },
-    profileImageUpload: {
-      position: 'absolute',
-      top: 0,
-      left: 0,
-      width: '100%',
-      height: '100%',
-      opacity: 0,
-      cursor: 'pointer',
-    },
-    profileImage: {
-      width: 'calc(100% - 8px)',
-      height: 'calc(100% - 8px)',
-      borderRadius: '0.5rem',
-      objectFit: 'contain',
-      objectPosition: 'center',
-      backgroundColor: 'rgba(255, 255, 255, 0.1)',
-      border: 'none', // No border on the image itself
-    },
     rightSection: {
       display: 'flex',
       alignItems: 'center',
@@ -638,7 +542,6 @@ function App() {
     sampleDataButton: {
       padding: '0.75rem 1.5rem',
       borderRadius: '0.75rem',
-      border: 'none',
       background: 'linear-gradient(135deg, #059669 0%, #047857 100%)',
       color: 'white',
       fontSize: '0.875rem',
@@ -1310,24 +1213,6 @@ function App() {
     return () => document.removeEventListener('keydown', handleEscape);
   }, [showMetrics]);
 
-  const handleProfileImageUpload = (event) => {
-    const file = event.target.files[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        setProfileImage(e.target.result);
-        toast.success('Profile image updated!');
-      };
-      reader.readAsDataURL(file);
-    }
-  };
-
-  // Add function to reset to default profile image
-  const resetToDefaultProfile = () => {
-    setProfileImage('/assets/profile.jpg');
-    toast.info('Reset to default profile image');
-  };
-
   return (
     <div style={styles.container}>
       <div style={styles.backgroundPattern}></div>
@@ -1335,43 +1220,8 @@ function App() {
         <div style={styles.headerGradientOverlay}></div>
         <div style={styles.headerContent}>
           <div style={styles.leftSection}>
-            <div style={styles.logoSection}>
-              <div style={styles.logoContainer}
-                   onMouseEnter={(e) => {
-                     e.target.style.transform = 'scale(1.05)'; // Removed rotation
-                     e.target.style.boxShadow = '0 6px 20px rgba(59, 130, 246, 0.3)'; // Softer hover shadow
-                   }}
-                   onMouseLeave={(e) => {
-                     e.target.style.transform = 'scale(1)';
-                     e.target.style.boxShadow = '0 4px 12px rgba(59, 130, 246, 0.2)';
-                   }}
-                   onDoubleClick={resetToDefaultProfile}>
-                <img 
-                  src={profileImage} 
-                  alt="Profile" 
-                  style={styles.profileImage}
-                  onError={(e) => {
-                    console.log('Image failed to load:', profileImage);
-                    // Fallback to AML text if image fails to load
-                    e.target.style.display = 'none';
-                    e.target.nextSibling.style.display = 'flex';
-                  }}
-                  onLoad={() => {
-                    console.log('Image loaded successfully:', profileImage);
-                  }}
-                />
-                <span style={{...styles.logoText, display: 'none', alignItems: 'center', justifyContent: 'center', width: '100%', height: '100%'}}>AML</span>
-                <input
-                  type="file"
-                  accept="image/*"
-                  onChange={handleProfileImageUpload}
-                  style={styles.profileImageUpload}
-                  title="Click to upload your profile image, double-click to reset to default"
-                />
-              </div>
-            </div>
             <h1 style={styles.title} className="fade-in-up floating-glow">
-              🚀 AML Analysis Dashboard
+              🚀 Financial Crimes Analysis Dashboard
             </h1>
           </div>
           

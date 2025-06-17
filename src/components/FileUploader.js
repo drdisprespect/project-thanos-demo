@@ -256,7 +256,7 @@ const FileUploader = ({ onFileUpload }) => {
       <div style={styles.header}>
         <h2 style={styles.title}>Upload Excel File</h2>
         <p style={styles.description}>
-          Upload your Excel file containing justification data for AML analysis
+          Upload your data file for analysis
         </p>
       </div>
 
